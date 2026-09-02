@@ -875,6 +875,29 @@ st.markdown(
     [data-testid="stSidebar"] {
         border-right: 1px solid #d9dee8;
     }
+
+    /* High-contrast text for accessibility and reliable rendering across themes. */
+    .stApp, .stApp p, .stApp label, .stApp span, .stApp div,
+    [data-testid="stSidebar"], [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] span {
+        color: #111111;
+    }
+    .research-kicker, .section-note, .research-subtitle, .method-text,
+    .method-number, .footer-line, .stCaption, [data-testid="stCaptionContainer"] {
+        color: #444444 !important;
+    }
+    .research-title, .section-title, .method-heading {
+        color: #111111 !important;
+    }
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
+        color: #111111 !important;
+    }
+    input, textarea, [data-baseweb="select"] * {
+        color: #111111 !important;
+    }
+    code {
+        color: #111111 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -931,22 +954,45 @@ for col, (num, heading, description) in zip(cols, steps):
 # ------------------------------------------------------------
 with st.sidebar:
     st.markdown("### Processing parameters")
+    st.caption(
+        "These controls affect how aggressively the application retrieves pages and "
+        "how short an extracted text can be before it is excluded."
+    )
     delay = st.number_input(
-        "Request delay",
+        "Request delay (seconds)",
         min_value=0.0,
         max_value=60.0,
         value=float(DELAY),
         step=0.1,
-        help="Pause between requests to reduce load on source websites.",
+        help="Pause between article requests. The default 1.5 s is a conservative choice for normal research batches.",
     )
     min_article_length = st.number_input(
-        "Minimum article length",
+        "Minimum article length (characters)",
         min_value=0,
         max_value=100000,
         value=int(MIN_ARTICLE_LENGTH),
         step=10,
-        help="Articles shorter than this number of characters are recorded as failures.",
+        help="Extracted texts shorter than this threshold are logged as short articles rather than added to the corpus.",
     )
+
+    with st.expander("How should I choose these values?", expanded=False):
+        st.markdown(
+            """
+            **Request delay**
+
+            - **1.5 s (recommended default):** good for ordinary research batches and the closest match to the original script.
+            - **2–5 s:** preferable for very large corpora, slower servers, or when you want to be especially conservative toward source websites.
+            - **0–1 s:** useful only for small test batches. Faster is not necessarily better and may increase the chance of rate limiting.
+
+            **Minimum article length**
+
+            - **100 characters (recommended default):** keeps the original script's behavior and removes obviously empty/very short extractions.
+            - **200–500 characters:** useful when you want to exclude snippets, navigation remnants, or unusually poor extractions more aggressively.
+            - **0 characters:** mainly for diagnostic/testing purposes; it may allow low-quality extractions into the corpus.
+
+            There is no universally correct threshold: choose values that match the corpus and document them when reporting your research.
+            """
+        )
 
     st.markdown("---")
     st.markdown("### Reproducibility")
@@ -957,7 +1003,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Input specification")
-    st.code("media_name\npublish_date\nurl", language="text")
+    st.markdown(
+        "Your CSV must contain these **three column names**. Each row represents one "
+        "MediaCloud article record."
+    )
+    st.markdown("**`media_name`** — the MediaCloud media/source name, e.g. `kathimerini.gr`.\n\n"
+                "**`publish_date`** — the article's publication date/time, preferably in a standard form such as `2026-03-15` or an ISO datetime. The year is used for corpus metadata and publication statistics.\n\n"
+                "**`url`** — the full web address of the article, beginning with `http://` or `https://`. The application retrieves the page at this address and extracts its article text.")
 
 # ------------------------------------------------------------
 # Upload
@@ -1049,33 +1101,46 @@ st.markdown(
 
 sorted_sources = sorted(source_counts.items(), key=lambda item: item[0].lower())
 
+# Use widget state for each checkbox. This avoids the common Streamlit issue where
+# a button changes a separate set and the checkbox widgets immediately overwrite it.
+source_fingerprint = "|".join(f"{s}:{c}" for s, c in sorted_sources)
+if st.session_state.get("source_fingerprint") != source_fingerprint:
+    st.session_state["source_fingerprint"] = source_fingerprint
+    for idx, (source, _) in enumerate(sorted_sources):
+        st.session_state[f"source_choice_{idx}"] = True
+
+def set_all_sources(value):
+    for idx, _ in enumerate(sorted_sources):
+        st.session_state[f"source_choice_{idx}"] = value
+
 c1, c2, c3 = st.columns([1, 1, 2])
 with c1:
-    if st.button("Select all sources", use_container_width=True):
-        st.session_state["selected_sources"] = {s for s, _ in sorted_sources}
+    st.button(
+        "Select all sources",
+        use_container_width=True,
+        on_click=set_all_sources,
+        args=(True,),
+    )
 with c2:
-    if st.button("Clear selection", use_container_width=True):
-        st.session_state["selected_sources"] = set()
-
-if "selected_sources" not in st.session_state:
-    st.session_state["selected_sources"] = {s for s, _ in sorted_sources}
+    st.button(
+        "Clear selection",
+        use_container_width=True,
+        on_click=set_all_sources,
+        args=(False,),
+    )
+with c3:
+    st.caption("Use the buttons to reset the entire source list, or select individual sources below.")
 
 selected_sources = set()
-
-# Compact two-column source selector.
 source_cols = st.columns(2)
 for i, (source, count) in enumerate(sorted_sources):
-    key = "source_" + re.sub(r"[^a-zA-Z0-9_]", "_", source)
     with source_cols[i % 2]:
         checked = st.checkbox(
             f"{source}  ·  {count:,}",
-            value=source in st.session_state["selected_sources"],
-            key=key,
+            key=f"source_choice_{i}",
         )
         if checked:
             selected_sources.add(source)
-
-st.session_state["selected_sources"] = selected_sources
 
 selected_rows = [
     row for row in rows
@@ -1152,6 +1217,7 @@ run = st.button(
 )
 
 if run:
+    st.session_state["corpus_run_requested"] = True
     runtime_output = "news_iramuteq.txt"
     runtime_failed = "failed_articles.txt"
     runtime_stats = "publication_counts_by_year.csv"
@@ -1486,10 +1552,82 @@ if run:
             """
         )
 
+    st.session_state["research_outputs"] = {
+        "corpus": corpus_bytes,
+        "failed": failed_bytes,
+        "stats": stats_bytes,
+        "successful": successful,
+        "errors": errors,
+        "duplicate_count": duplicate_count,
+        "national_count": national_count,
+        "regional_count": regional_count,
+        "unclassified_count": unclassified_count,
+        "rows_processed": len(rows_to_process),
+        "missing_metadata": missing_metadata,
+        "request_errors": request_errors,
+        "extraction_errors": extraction_errors,
+        "short_articles": short_articles,
+        "unexpected_errors": unexpected_errors,
+        "invalid_date_rows": invalid_date_rows,
+    }
+
+# ------------------------------------------------------------
+# Persistent research outputs
+# ------------------------------------------------------------
+# Streamlit reruns the script when a download button is pressed. Keep the generated
+# files in session state so the results section remains available for subsequent downloads.
+if st.session_state.get("research_outputs") and not run:
+    out = st.session_state["research_outputs"]
+    st.markdown('<div class="section-title">4. Research outputs</div>', unsafe_allow_html=True)
+    st.success("Corpus construction is complete. Your generated files remain available for download in this session.")
+
+    r = st.columns(5)
+    r[0].metric("Articles saved", f"{out['successful']:,}")
+    r[1].metric("Articles failed", f"{out['errors']:,}")
+    r[2].metric("Duplicate URLs", f"{out['duplicate_count']:,}")
+    r[3].metric("National press", f"{out['national_count']:,}")
+    r[4].metric("Regional press", f"{out['regional_count']:,}")
+
+    if out["successful"]:
+        st.caption(f"Extraction success rate: **{100 * out['successful'] / out['rows_processed']:.1f}%** ({out['successful']:,} of {out['rows_processed']:,} processed records).")
+
+    st.markdown("### Download research outputs")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key="download_corpus_persistent")
+    with d2:
+        st.download_button("Download publication statistics", data=out["stats"], file_name="publication_counts_by_year.csv", mime="text/csv", use_container_width=True, key="download_stats_persistent")
+    with d3:
+        st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key="download_failed_persistent")
+
+    with st.expander("Diagnostics", expanded=False):
+        st.dataframe([
+            {"Failure category": "Metadata errors", "Count": out["missing_metadata"]},
+            {"Failure category": "Request errors", "Count": out["request_errors"]},
+            {"Failure category": "Extraction errors", "Count": out["extraction_errors"]},
+            {"Failure category": "Short articles", "Count": out["short_articles"]},
+            {"Failure category": "Unexpected errors", "Count": out["unexpected_errors"]},
+        ], use_container_width=True, hide_index=True)
+        if out["invalid_date_rows"]:
+            st.warning(f"{out['invalid_date_rows']:,} selected rows had unparseable dates and were omitted from publication statistics.")
+        if out["unclassified_count"]:
+            st.warning(f"{out['unclassified_count']:,} successfully extracted articles came from sources not present in the built-in National/Regional Press lists.")
+
+    with st.expander("Methodological notes", expanded=False):
+        st.markdown(
+            """
+            **Publication statistics** are calculated directly from the selected MediaCloud records before duplicate URL removal and before article extraction.
+
+            **Corpus counts** can therefore differ from publication statistics because records may be excluded for duplicate URLs, invalid metadata, inaccessible pages, extraction failures, or insufficient text length.
+
+            **IRaMuTeQ metadata** retain the original MediaCloud row number through the `rawnb` field, allowing the resulting corpus to be traced back to the source CSV.
+            """
+        )
+
 st.markdown(
     '<div class="footer-line">'
     'MediaCloud → IRaMuTeQ · corpus preparation interface · '
-    'Designed for reproducible text analysis workflows'
+    'Created by Panos Tsimpoukis · LERASS · NTUA'
     '</div>',
     unsafe_allow_html=True,
 )

@@ -86,3 +86,8 @@ lists with an external classification.
 Publication statistics are calculated before duplicate URL removal and article
 extraction. Consequently, publication statistics and final corpus counts are
 expected to differ when records are duplicated or extraction fails.
+
+## Credits
+
+Created by **Panos Tsimpoukis**, **LERASS**, **NTUA**.
+
