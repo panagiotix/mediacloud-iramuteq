@@ -898,6 +898,66 @@ st.markdown(
     code {
         color: #111111 !important;
     }
+
+    /* Dark controls: keep text white wherever Streamlit renders a dark widget. */
+    [data-testid="stSidebar"] {
+        background: #111111 !important;
+    }
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * {
+        color: #ffffff !important;
+    }
+
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] [data-baseweb="select"],
+    [data-testid="stSidebar"] [data-baseweb="input"],
+    [data-testid="stSidebar"] [role="spinbutton"] {
+        background-color: #111111 !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border-color: #555555 !important;
+    }
+
+    [data-testid="stSidebar"] input::placeholder,
+    [data-testid="stSidebar"] textarea::placeholder {
+        color: #d0d0d0 !important;
+        -webkit-text-fill-color: #d0d0d0 !important;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button,
+    [data-testid="stFormSubmitButton"] > button {
+        background-color: #111111 !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border: 1px solid #111111 !important;
+    }
+
+    .stButton > button *,
+    .stDownloadButton > button *,
+    [data-testid="stFormSubmitButton"] > button * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    [data-testid="stFormSubmitButton"] > button:hover {
+        background-color: #2b2b2b !important;
+        color: #ffffff !important;
+    }
+
+    /* Keep the main source-selection labels readable on the light research canvas. */
+    [data-testid="stCheckbox"] label,
+    [data-testid="stCheckbox"] label p,
+    [data-testid="stCheckbox"] label span {
+        color: #111111 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
