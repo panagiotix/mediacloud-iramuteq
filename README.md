@@ -91,3 +91,45 @@ expected to differ when records are duplicated or extraction fails.
 
 Created by **Panos Tsimpoukis**, **LERASS**, **NTUA**.
 
+
+### Corpus language and source classification
+
+The application can also be used for corpora in languages other than Greek (for example French). Article text extraction is Unicode-aware and does not require the corpus to be Greek. In the sidebar, select **Other language — do not classify as National / Regional press** to switch off the built-in Greek-specific National/Regional source classification. The `type` metadata will then remain `unclassified`.
+
+The uploaded CSV filename does not need to be `mediacloud_articles.csv`; any `.csv` filename is accepted. The required column names are `media_name`, `publish_date`, and `url`.
+
+### Custom metadata and multiple classifications
+
+Researchers can add their own classifications without changing the source code.
+In the **Custom metadata** section, select one or more additional columns from
+the uploaded CSV. Each selected CSV header becomes an IRaMuTeQ metadata field,
+and the value in that row becomes the category for the article.
+
+For example, a CSV containing:
+
+```text
+media_name,publish_date,url,mediatype,region,ownership
+example.gr,2026-06-23,https://example.gr/article,national,attica,private
+```
+
+can produce a header containing:
+
+```text
+**** *source_examplegr *year_2026 *yearmonth_2026-06 *type_nationalpress *rawnb_2 *mediatype_national *region_attica *ownership_private
+```
+
+This allows researchers to create their own national/regional classification,
+regional coding, ownership categories, political-orientation variables, or any
+other classification represented by columns in their CSV.
+
+Multiple classifications can be selected simultaneously. The application does
+not modify the original CSV values. For IRaMuTeQ compatibility, custom metadata
+names and values are normalized to lowercase ASCII-safe tokens: accents are
+removed, whitespace and punctuation become underscores, repeated underscores
+are collapsed, and empty cells become `missing`. If two selected column headers
+normalize to the same metadata name, a numeric suffix is added to keep the
+fields unique.
+
+The built-in Greek `type` classification remains independent of custom metadata.
+For non-Greek corpora, users can switch off the built-in National/Regional
+classification and use their own classification columns instead.

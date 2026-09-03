@@ -4,6 +4,7 @@
 import csv
 import re
 import time
+import unicodedata
 
 from collections import defaultdict
 from datetime import datetime
@@ -424,6 +425,40 @@ def valid_url(url):
 # ============================================================
 # CLEAN ARTICLE TEXT
 # ============================================================
+
+def clean_custom_metadata_token(value, fallback="missing"):
+    """
+    Convert a user-supplied metadata name/value into an IRaMuTeQ-safe token.
+
+    Accents are removed, whitespace/punctuation become underscores, repeated
+    underscores are collapsed, and values are normalized to lowercase.
+    Empty cells become the explicit category ``missing``.
+    """
+    value = "" if value is None else str(value).strip().lower()
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or fallback
+
+
+def prepare_custom_metadata_fields(columns):
+    """
+    Create unique IRaMuTeQ metadata field names from CSV column headers.
+    """
+    used = {}
+    prepared = []
+
+    for column in columns:
+        base = clean_custom_metadata_token(column, fallback="metadata")
+        count = used.get(base, 0) + 1
+        used[base] = count
+        field = base if count == 1 else f"{base}_{count}"
+        prepared.append((column, field))
+
+    return prepared
+
 
 def clean_text(text):
     """
@@ -1054,6 +1089,23 @@ with st.sidebar:
             """
         )
 
+    st.markdown("### Corpus language / source classification")
+    classification_mode = st.selectbox(
+        "How should sources be classified?",
+        options=[
+            "Greek corpus — use National / Regional press classification",
+            "Other language — do not classify as National / Regional press",
+        ],
+        index=0,
+        help="Choose the second option for French or other non-Greek corpora. The article text is still extracted normally; only the Greek-specific National/Regional press classification is switched off.",
+    )
+    use_press_classification = classification_mode.startswith("Greek corpus")
+    st.caption(
+        "For non-Greek corpora, the tool keeps the source and date metadata but leaves the press category as unclassified."
+        if not use_press_classification else
+        "For Greek corpora, the built-in National Press and Regional Press lists are used."
+    )
+
     st.markdown("### Processing settings")
     st.caption(
         "These controls affect how aggressively the application retrieves pages and "
@@ -1100,8 +1152,8 @@ This controls how long the app waits before visiting the next article webpage. A
     st.markdown("---")
     st.markdown("### Reproducibility")
     st.caption(
-        "Source classification follows the built-in National Press and Regional "
-        "Press lists. Original MediaCloud row numbers are preserved in the IRaMuTeQ metadata."
+        "Original MediaCloud row numbers are preserved in the IRaMuTeQ metadata. "
+        "National/Regional press classification is used only when the Greek-corpus option is selected."
     )
 
     st.markdown("---")
@@ -1118,7 +1170,7 @@ This controls how long the app waits before visiting the next article webpage. A
 
         **`url`** — the complete web address of the article (for example, `https://example.org/article`). The application visits this webpage and attempts to extract the article text.
 
-        **In short:** one CSV row should correspond to one article record from your MediaCloud export.
+        **In short:** one CSV row should correspond to one article record from your MediaCloud export. The file can have any filename (for example, `my_french_corpus.csv`); only the required column names matter.
         """
     )
 
@@ -1127,7 +1179,7 @@ This controls how long the app waits before visiting the next article webpage. A
 # ------------------------------------------------------------
 st.markdown('<div class="section-title">1. Corpus input</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="section-note">Upload the CSV exported from MediaCloud.</div>',
+    '<div class="section-note">Upload the CSV exported from MediaCloud. The filename itself does not matter; the application reads the file you upload.</div>',
     unsafe_allow_html=True,
 )
 
@@ -1200,6 +1252,13 @@ overview = st.columns(3)
 overview[0].metric("Input records", f"{len(rows):,}")
 overview[1].metric("Unique media names", f"{len(source_counts):,}")
 overview[2].metric("CSV size", f"{len(uploaded_bytes) / 1024:.1f} KB")
+
+
+def classify_for_corpus(media_name):
+    """Apply the selected corpus-level classification policy."""
+    if not use_press_classification:
+        return "unclassified"
+    return classify_source(media_name)
 
 # ------------------------------------------------------------
 # Source selection
@@ -1276,7 +1335,7 @@ with st.expander("Review source classification", expanded=False):
             {
                 "Source": source,
                 "Articles": source_counts[source],
-                "Classification": classify_source(source),
+                "Classification": classify_for_corpus(source),
             }
         )
     if preview:
@@ -1293,9 +1352,58 @@ if not selected_rows:
     st.stop()
 
 # ------------------------------------------------------------
+# Custom metadata
+# ------------------------------------------------------------
+st.markdown('<div class="section-title">3. Custom metadata</div>', unsafe_allow_html=True)
+st.markdown(
+    "<div class='section-note'>Optionally carry one or more additional CSV columns into each IRaMuTeQ document header. The column header becomes the metadata name, and each row value becomes that article's metadata category.</div>",
+    unsafe_allow_html=True,
+)
+
+required_columns = {"media_name", "publish_date", "url"}
+custom_metadata_options = [
+    column for column in reader.fieldnames
+    if column not in required_columns and not column.startswith("_")
+]
+
+custom_metadata_columns = st.multiselect(
+    "Select CSV columns to add as metadata",
+    options=custom_metadata_options,
+    help="You can select multiple columns. For example, a column named mediatype with values national/regional will produce *mediatype_national and *mediatype_regional in the IRaMuTeQ headers.",
+)
+
+custom_metadata_fields = prepare_custom_metadata_fields(custom_metadata_columns)
+
+if custom_metadata_fields:
+    st.caption(
+        "Selected columns are preserved as separate metadata fields. "
+        "Accents are removed and spaces/punctuation are converted to underscores "
+        "for IRaMuTeQ-safe names and values; empty cells become `missing`."
+    )
+
+    preview_row = selected_rows[0] if selected_rows else rows[0]
+    metadata_preview = []
+    for original_column, field_name in custom_metadata_fields:
+        raw_value = preview_row.get(original_column, "")
+        safe_value = clean_custom_metadata_token(raw_value)
+        metadata_preview.append(
+            {
+                "CSV column": original_column,
+                "IRaMuTeQ metadata": f"*{field_name}_{safe_value}",
+            }
+        )
+
+    with st.expander("Preview custom metadata", expanded=True):
+        st.dataframe(metadata_preview, use_container_width=True, hide_index=True)
+else:
+    st.caption(
+        "No custom metadata selected. The corpus will use the built-in source/date/type/rawnb metadata only."
+    )
+
+# ------------------------------------------------------------
 # Run
 # ------------------------------------------------------------
-st.markdown('<div class="section-title">3. Corpus construction</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">4. Corpus construction</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="section-note">'
     'The application will deduplicate URLs, retrieve article pages, extract text, '
@@ -1310,13 +1418,17 @@ with st.expander("What will be produced?", expanded=False):
         """
         **IRaMuTeQ corpus**
 
-        Each successfully extracted article receives five metadata fields:
+        Each successfully extracted article receives five core metadata fields:
 
         - `source` — cleaned name of the publication or media source.
         - `year` — publication year.
         - `yearmonth` — publication year and month, in `YYYY-MM` format.
         - `type` — source category: national press, regional press, or unclassified.
         - `rawnb` — original row number of the article in the uploaded CSV, useful for tracing the corpus entry back to the source data.
+
+        **Custom metadata**
+
+        Any additional CSV columns selected above are appended to the same IRaMuTeQ header. The CSV header becomes the metadata name and each cell becomes that article's category. Multiple classifications can be selected at once, such as `mediatype`, `region`, `ownership`, or `political_orientation`.
 
         **Publication statistics**
 
@@ -1518,7 +1630,7 @@ if run:
                 continue
 
             source = clean_source_name(media_name)
-            press_type = classify_source(media_name)
+            press_type = classify_for_corpus(media_name)
 
             if press_type == "nationalpress":
                 national_count += 1
@@ -1527,20 +1639,28 @@ if run:
             else:
                 unclassified_count += 1
 
-            header = (
-                "****"
-                f" *source_{source}"
-                f" *year_{year}"
-                f" *yearmonth_{year}-{month}"
-                f" *type_{press_type}"
-                f" *rawnb_{raw_number}"
-            )
+            custom_tokens = []
+            for original_column, field_name in custom_metadata_fields:
+                raw_value = row.get(original_column, "")
+                safe_value = clean_custom_metadata_token(raw_value)
+                custom_tokens.append(f"*{field_name}_{safe_value}")
+
+            header_parts = [
+                "****",
+                f"*source_{source}",
+                f"*year_{year}",
+                f"*yearmonth_{year}-{month}",
+                f"*type_{press_type}",
+                f"*rawnb_{raw_number}",
+                *custom_tokens,
+            ]
+            header = " ".join(header_parts)
 
             output_buffer.write(header + "\n")
             output_buffer.write(article + "\n\n")
             successful += 1
 
-            if press_type == "unclassified":
+            if press_type == "unclassified" and use_press_classification:
                 write_failure_web(
                     raw_number,
                     media_name,
@@ -1670,6 +1790,11 @@ if run:
             **IRaMuTeQ metadata** retain the original MediaCloud row number through
             the `rawnb` field, allowing the resulting corpus to be traced back to
             the source CSV.
+
+            **Custom metadata** are copied from the selected CSV columns. The column
+            header becomes the metadata field name and each cell becomes the category
+            for that article. Metadata names and values are normalized to lowercase
+            ASCII-safe tokens; empty cells are represented as `missing`.
             """
         )
 
@@ -1690,6 +1815,7 @@ if run:
         "short_articles": short_articles,
         "unexpected_errors": unexpected_errors,
         "invalid_date_rows": invalid_date_rows,
+        "custom_metadata_columns": custom_metadata_columns,
     }
 
 # ------------------------------------------------------------
@@ -1699,7 +1825,7 @@ if run:
 # files in session state so the results section remains available for subsequent downloads.
 if st.session_state.get("research_outputs") and not run:
     out = st.session_state["research_outputs"]
-    st.markdown('<div class="section-title">4. Research outputs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">5. Research outputs</div>', unsafe_allow_html=True)
     st.success("Corpus construction is complete. Your generated files remain available for download in this session.")
 
     r = st.columns(5)
