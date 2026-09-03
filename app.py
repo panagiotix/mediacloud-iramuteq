@@ -975,6 +975,12 @@ st.markdown(
     }
 
     /* Metadata field names on dark research cards. */
+    .metadata-card {
+        background: #111111 !important;
+        border: 1px solid #333333 !important;
+        border-radius: 10px !important;
+        padding: 1.1rem 1.2rem !important;
+    }
     .metadata-card, .metadata-card * {
         color: #ffffff !important;
         -webkit-text-fill-color: #ffffff !important;
@@ -1218,6 +1224,26 @@ def set_all_sources(value):
     for idx, _ in enumerate(sorted_sources):
         st.session_state[f"source_choice_{idx}"] = value
 
+
+# Selection controls are deliberately placed before the checkbox widgets so
+# Streamlit can update their session state cleanly on the next rerun.
+control_col1, control_col2, _ = st.columns([1, 1, 2])
+with control_col1:
+    st.button(
+        "Select all",
+        key="select_all_sources",
+        on_click=set_all_sources,
+        args=(True,),
+        use_container_width=True,
+    )
+with control_col2:
+    st.button(
+        "Deselect all",
+        key="deselect_all_sources",
+        on_click=set_all_sources,
+        args=(False,),
+        use_container_width=True,
+    )
 
 selected_sources = set()
 source_cols = st.columns(2)
