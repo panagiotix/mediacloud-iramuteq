@@ -958,6 +958,27 @@ st.markdown(
     [data-testid="stCheckbox"] label span {
         color: #111111 !important;
     }
+
+    /* High-contrast uploader: the selected filename must remain readable. */
+    [data-testid="stFileUploader"] section,
+    [data-testid="stFileUploaderDropzone"],
+    [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderFileName"],
+    [data-testid="stFileUploaderFileName"] *,
+    [data-testid="stFileUploader"] small {
+        color: #111111 !important;
+        -webkit-text-fill-color: #111111 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        background: #ffffff !important;
+        border-color: #777777 !important;
+    }
+
+    /* Metadata field names on dark research cards. */
+    .metadata-card, .metadata-card * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1013,18 +1034,32 @@ for col, (num, heading, description) in zip(cols, steps):
 # Sidebar: reproducibility / parameters
 # ------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### Processing parameters")
+    with st.expander("About", expanded=False):
+        st.markdown(
+            """
+            **MediaCloud → IRaMuTeQ**
+
+            A research tool for transforming MediaCloud article records into an IRaMuTeQ-compatible corpus.
+
+            **Created by**  
+            Panos Tsimpoukis  
+            with the help of ChatGPT  
+            LERASS (UT) · PhEPoC-ST (NTUA)
+            """
+        )
+
+    st.markdown("### Processing settings")
     st.caption(
         "These controls affect how aggressively the application retrieves pages and "
         "how short an extracted text can be before it is excluded."
     )
     delay = st.number_input(
-        "Request delay (seconds)",
+        "Wait between article requests (seconds)",
         min_value=0.0,
         max_value=60.0,
         value=float(DELAY),
         step=0.1,
-        help="Pause between article requests. The default 1.5 s is a conservative choice for normal research batches.",
+        help="This is the pause between visits to article webpages. Use 1.5 seconds for normal use. Use 2–5 seconds for very large datasets or when you want to be more conservative toward websites. Lower values are mainly for small tests.",
     )
     min_article_length = st.number_input(
         "Minimum article length (characters)",
@@ -1035,10 +1070,12 @@ with st.sidebar:
         help="Extracted texts shorter than this threshold are logged as short articles rather than added to the corpus.",
     )
 
-    with st.expander("How should I choose these values?", expanded=False):
+    with st.expander("How should I choose these settings?", expanded=False):
         st.markdown(
             """
-            **Request delay**
+            **Wait between article requests**
+
+This controls how long the app waits before visiting the next article webpage. A longer wait is slower but more considerate to the websites being accessed.
 
             - **1.5 s (recommended default):** good for ordinary research batches and the closest match to the original script.
             - **2–5 s:** preferable for very large corpora, slower servers, or when you want to be especially conservative toward source websites.
@@ -1067,9 +1104,17 @@ with st.sidebar:
         "Your CSV must contain these **three column names**. Each row represents one "
         "MediaCloud article record."
     )
-    st.markdown("**`media_name`** — the MediaCloud media/source name, e.g. `kathimerini.gr`.\n\n"
-                "**`publish_date`** — the article's publication date/time, preferably in a standard form such as `2026-03-15` or an ISO datetime. The year is used for corpus metadata and publication statistics.\n\n"
-                "**`url`** — the full web address of the article, beginning with `http://` or `https://`. The application retrieves the page at this address and extracts its article text.")
+    st.markdown(
+        """
+        **`media_name`** — the name of the newspaper, website, or other media source as recorded by MediaCloud (for example, `kathimerini.gr`).
+
+        **`publish_date`** — the date/time when the article was published. The application uses it to determine the publication year and year-month.
+
+        **`url`** — the complete web address of the article (for example, `https://example.org/article`). The application visits this webpage and attempts to extract the article text.
+
+        **In short:** one CSV row should correspond to one article record from your MediaCloud export.
+        """
+    )
 
 # ------------------------------------------------------------
 # Upload
@@ -1173,30 +1218,13 @@ def set_all_sources(value):
     for idx, _ in enumerate(sorted_sources):
         st.session_state[f"source_choice_{idx}"] = value
 
-c1, c2, c3 = st.columns([1, 1, 2])
-with c1:
-    st.button(
-        "Select all sources",
-        use_container_width=True,
-        on_click=set_all_sources,
-        args=(True,),
-    )
-with c2:
-    st.button(
-        "Clear selection",
-        use_container_width=True,
-        on_click=set_all_sources,
-        args=(False,),
-    )
-with c3:
-    st.caption("Use the buttons to reset the entire source list, or select individual sources below.")
 
 selected_sources = set()
 source_cols = st.columns(2)
 for i, (source, count) in enumerate(sorted_sources):
     with source_cols[i % 2]:
         checked = st.checkbox(
-            f"{source}  ·  {count:,}",
+            f"{source}  ·  {count:,} articles",
             key=f"source_choice_{i}",
         )
         if checked:
@@ -1251,12 +1279,18 @@ st.markdown(
 )
 
 with st.expander("What will be produced?", expanded=False):
+    st.markdown('<div class="metadata-card">', unsafe_allow_html=True)
     st.markdown(
         """
         **IRaMuTeQ corpus**
 
-        Each successfully extracted article receives the metadata fields:
-        `source`, `year`, `yearmonth`, `type`, and `rawnb`.
+        Each successfully extracted article receives five metadata fields:
+
+        - `source` — cleaned name of the publication or media source.
+        - `year` — publication year.
+        - `yearmonth` — publication year and month, in `YYYY-MM` format.
+        - `type` — source category: national press, regional press, or unclassified.
+        - `rawnb` — original row number of the article in the uploaded CSV, useful for tracing the corpus entry back to the source data.
 
         **Publication statistics**
 
@@ -1269,6 +1303,7 @@ with st.expander("What will be produced?", expanded=False):
         failures, short articles, and unexpected errors.
         """
     )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 run = st.button(
     "Begin corpus construction",
@@ -1686,8 +1721,7 @@ if st.session_state.get("research_outputs") and not run:
 
 st.markdown(
     '<div class="footer-line">'
-    'MediaCloud → IRaMuTeQ · corpus preparation interface · '
-    'Created by Panos Tsimpoukis · LERASS · NTUA'
+    'MediaCloud → IRaMuTeQ · corpus preparation interface'
     '</div>',
     unsafe_allow_html=True,
 )
