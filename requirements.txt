@@ -1,3 +1,5 @@
 streamlit>=1.40,<2
 requests>=2.31
 trafilatura>=1.8
+
+matplotlib>=3.8
