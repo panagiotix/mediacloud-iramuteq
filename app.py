@@ -1101,7 +1101,7 @@ with st.sidebar:
     )
     use_press_classification = classification_mode.startswith("Greek corpus")
     st.caption(
-        "For non-Greek corpora, the tool keeps the source and date metadata but leaves the press category as unclassified."
+        "For non-Greek corpora, no built-in *type metadata is added. Use Custom metadata below for your own classifications."
         if not use_press_classification else
         "For Greek corpora, the built-in National Press and Regional Press lists are used."
     )
@@ -1205,12 +1205,48 @@ if uploaded is None:
 # ------------------------------------------------------------
 # Read input
 # ------------------------------------------------------------
+def normalize_csv_header(value):
+    """Normalize common spreadsheet-export artifacts in CSV headers."""
+    value = "" if value is None else str(value)
+    value = value.replace("\ufeff", "").strip()
+    # Some spreadsheet exports use single quotes as the text qualifier.
+    # Remove only a matching pair around the complete header value.
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    return value
+
+
+def read_csv_robustly(decoded):
+    """Read normal CSVs plus common spreadsheet quoting variations."""
+    required_columns = {"media_name", "publish_date", "url"}
+    attempts = [
+        {},
+        {"quotechar": "'"},
+    ]
+
+    last_reader = None
+    for kwargs in attempts:
+        reader = csv.DictReader(io.StringIO(decoded), **kwargs)
+        if not reader.fieldnames:
+            continue
+
+        normalized_fields = [normalize_csv_header(h) for h in reader.fieldnames]
+        reader.fieldnames = normalized_fields
+        if required_columns.issubset(set(normalized_fields)):
+            return reader
+        last_reader = reader
+
+    # If the headers still do not match, return the last parsed reader so the
+    # caller can provide a precise missing-column message.
+    return last_reader
+
+
 try:
     uploaded_bytes = uploaded.getvalue()
     decoded = uploaded_bytes.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(decoded))
+    reader = read_csv_robustly(decoded)
 
-    if not reader.fieldnames:
+    if reader is None or not reader.fieldnames:
         st.error("The CSV contains no header.")
         st.stop()
 
@@ -1221,13 +1257,22 @@ try:
         st.error(
             "The uploaded CSV is missing required columns: "
             + ", ".join(sorted(missing))
+            + ". Common spreadsheet exports can add quotes around headers; "
+              "the application already handles the most common variants."
         )
         st.stop()
 
     rows = []
     for row_number, row in enumerate(reader, 2):
-        row["_rawnb"] = row_number
-        rows.append(row)
+        # Normalize keys once more for safety and discard empty trailing columns
+        # created by spreadsheet exports.
+        normalized_row = {
+            normalize_csv_header(key): value
+            for key, value in row.items()
+            if normalize_csv_header(key)
+        }
+        normalized_row["_rawnb"] = row_number
+        rows.append(normalized_row)
 
 except Exception as e:
     st.error(f"Unable to read the CSV: {type(e).__name__}: {e}")
@@ -1257,7 +1302,7 @@ overview[2].metric("CSV size", f"{len(uploaded_bytes) / 1024:.1f} KB")
 def classify_for_corpus(media_name):
     """Apply the selected corpus-level classification policy."""
     if not use_press_classification:
-        return "unclassified"
+        return None
     return classify_source(media_name)
 
 # ------------------------------------------------------------
@@ -1397,7 +1442,7 @@ if custom_metadata_fields:
         st.dataframe(metadata_preview, use_container_width=True, hide_index=True)
 else:
     st.caption(
-        "No custom metadata selected. The corpus will use the built-in source/date/type/rawnb metadata only."
+        "No custom metadata selected. The corpus will use the built-in source/date/rawnb metadata, plus type only when Greek classification is enabled."
     )
 
 # ------------------------------------------------------------
@@ -1423,7 +1468,7 @@ with st.expander("What will be produced?", expanded=False):
         - `source` — cleaned name of the publication or media source.
         - `year` — publication year.
         - `yearmonth` — publication year and month, in `YYYY-MM` format.
-        - `type` — source category: national press, regional press, or unclassified.
+        - `type` — built-in source category for Greek corpora: national press or regional press. It is omitted entirely for other-language corpora.
         - `rawnb` — original row number of the article in the uploaded CSV, useful for tracing the corpus entry back to the source data.
 
         **Custom metadata**
@@ -1636,7 +1681,7 @@ if run:
                 national_count += 1
             elif press_type == "regionalpress":
                 regional_count += 1
-            else:
+            elif press_type == "unclassified":
                 unclassified_count += 1
 
             custom_tokens = []
@@ -1650,10 +1695,10 @@ if run:
                 f"*source_{source}",
                 f"*year_{year}",
                 f"*yearmonth_{year}-{month}",
-                f"*type_{press_type}",
-                f"*rawnb_{raw_number}",
-                *custom_tokens,
             ]
+            if press_type is not None:
+                header_parts.append(f"*type_{press_type}")
+            header_parts.extend([f"*rawnb_{raw_number}", *custom_tokens])
             header = " ".join(header_parts)
 
             output_buffer.write(header + "\n")

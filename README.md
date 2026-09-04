@@ -94,7 +94,7 @@ Created by **Panos Tsimpoukis**, **LERASS**, **NTUA**.
 
 ### Corpus language and source classification
 
-The application can also be used for corpora in languages other than Greek (for example French). Article text extraction is Unicode-aware and does not require the corpus to be Greek. In the sidebar, select **Other language — do not classify as National / Regional press** to switch off the built-in Greek-specific National/Regional source classification. The `type` metadata will then remain `unclassified`.
+The application can also be used for corpora in languages other than Greek (for example French). Article text extraction is Unicode-aware and does not require the corpus to be Greek. In the sidebar, select **Other language — do not classify as National / Regional press** to switch off the built-in Greek-specific National/Regional source classification. In this mode, no `*type_...` metadata is written at all. Researchers can instead add their own classifications through Custom metadata.
 
 The uploaded CSV filename does not need to be `mediacloud_articles.csv`; any `.csv` filename is accepted. The required column names are `media_name`, `publish_date`, and `url`.
 
