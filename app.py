@@ -5,6 +5,10 @@ import csv
 import re
 import time
 import unicodedata
+import threading
+import uuid
+from io import StringIO, BytesIO
+
 
 from collections import defaultdict
 from datetime import datetime
@@ -12,6 +16,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import trafilatura
+
+
+# Background extraction jobs. A small in-process job registry lets Streamlit
+# rerun the UI while the extraction worker continues, making cancellation
+# possible without refreshing the page.
+EXTRACTION_JOBS = {}
+EXTRACTION_JOBS_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -773,6 +784,7 @@ def generate_publication_statistics(rows):
 import io
 from datetime import datetime
 
+import matplotlib.pyplot as plt
 import streamlit as st
 
 
@@ -1511,91 +1523,124 @@ run = st.button(
     "Begin corpus construction",
     type="primary",
     use_container_width=True,
+    disabled=bool(st.session_state.get("active_extraction_job_id")),
 )
 
-if run:
-    st.session_state["corpus_run_requested"] = True
-    runtime_output = "news_iramuteq.txt"
-    runtime_failed = "failed_articles.txt"
-    runtime_stats = "publication_counts_by_year.csv"
 
-    # Publication statistics: same logic as original script.
-    sources = sorted(
-        {
-            (row.get("media_name", "") or "").strip()
-            for row in selected_rows
-            if (row.get("media_name", "") or "").strip()
-        },
-        key=str.lower,
-    )
+def build_statistics_tables(selected_rows, saved_counts):
+    """Create two separate per-year x media tables directly from CSV records.
 
-    counts = defaultdict(lambda: defaultdict(int))
+    The initial table counts selected CSV rows before URL deduplication.
+    The saved table counts successfully extracted records by media/year.
+    """
+    initial_counts = defaultdict(lambda: defaultdict(int))
     years = set()
+    sources = set()
     invalid_date_rows = 0
 
     for row in selected_rows:
-        media_name = (row.get("media_name", "") or "").strip()
-        publish_date = (row.get("publish_date", "") or "").strip()
-        year = extract_year(publish_date)
-
-        if not year:
-            invalid_date_rows += 1
+        media = (row.get("media_name", "") or "").strip()
+        year = extract_year((row.get("publish_date", "") or "").strip())
+        if not media or not year:
+            if media and not year:
+                invalid_date_rows += 1
             continue
-
-        counts[year][media_name] += 1
+        initial_counts[year][media] += 1
         years.add(year)
+        sources.add(media)
 
-    stats_buffer = io.StringIO()
-    writer = csv.writer(stats_buffer)
-    writer.writerow(["year"] + sources)
-    for year in sorted(years, key=int):
-        writer.writerow(
-            [year] + [counts[year].get(source, 0) for source in sources]
-        )
-    stats_bytes = stats_buffer.getvalue().encode("utf-8-sig")
+    def matrix_csv(counts):
+        output = io.StringIO()
+        writer = csv.writer(output)
+        ordered_sources = sorted(sources, key=str.lower)
+        writer.writerow(["year"] + ordered_sources)
+        for year in sorted(years, key=int):
+            writer.writerow([year] + [counts[year].get(source, 0) for source in ordered_sources])
+        return output.getvalue().encode("utf-8-sig")
 
-    # URL deduplication: same logic as original.
-    selected_count = len(selected_rows)
+    initial_csv = matrix_csv(initial_counts)
+    saved_csv = matrix_csv(saved_counts)
+    return initial_csv, saved_csv, invalid_date_rows
+
+
+def build_statistics_plot_from_tables(initial_rows, saved_rows):
+    """Create a saveable PNG comparing totals from the two CSV-derived tables by year."""
+    initial_totals = defaultdict(int)
+    saved_totals = defaultdict(int)
+
+    for row in initial_rows:
+        year = str(row.get("year", ""))
+        if not year:
+            continue
+        initial_totals[year] += sum(int(value or 0) for key, value in row.items() if key != "year")
+
+    for row in saved_rows:
+        year = str(row.get("year", ""))
+        if not year:
+            continue
+        saved_totals[year] += sum(int(value or 0) for key, value in row.items() if key != "year")
+
+    years = sorted(set(initial_totals) | set(saved_totals), key=int)
+    if not years:
+        return None
+
+    initial = [initial_totals[y] for y in years]
+    saved = [saved_totals[y] for y in years]
+
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.plot(years, initial, marker="o", linewidth=2, label="Initial CSV records")
+    ax.plot(years, saved, marker="o", linewidth=2, label="Articles saved")
+    ax.set_title("Initial MediaCloud records vs. articles saved")
+    ax.set_xlabel("Publication year")
+    ax.set_ylabel("Number of articles")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def extraction_worker(job_id, selected_rows, custom_metadata_fields, delay, min_article_length, use_press_classification):
+    with EXTRACTION_JOBS_LOCK:
+        job = EXTRACTION_JOBS[job_id]
+        job["status"] = "running"
+
+    runtime_output = "news_iramuteq.txt"
+    runtime_failed = "failed_articles.txt"
+    runtime_stats = "publication_statistics_initial_vs_saved.csv"
+
+    # Deduplicate URLs, preserving the original CSV row for every unique URL.
     unique_rows = []
     seen = set()
     duplicate_count = 0
-
     for row in selected_rows:
         raw_url = (row.get("url", "") or "").strip()
-
         if not valid_url(raw_url):
             unique_rows.append(row)
             continue
-
         normalized_url = clean_url(raw_url)
-
         if normalized_url in seen:
             duplicate_count += 1
             continue
-
         seen.add(normalized_url)
         unique_rows.append(row)
 
-    rows_to_process = unique_rows
-
-    st.markdown("### Extraction progress")
-    progress = st.progress(0, text="Preparing requests…")
-    status = st.empty()
-    metrics = st.empty()
-
     output_buffer = io.StringIO()
     failed_buffer = io.StringIO()
+    saved_counts = defaultdict(lambda: defaultdict(int))
 
-    successful = 0
-    errors = 0
-    missing_metadata = 0
-    request_errors = 0
-    extraction_errors = 0
-    short_articles = 0
-    unexpected_errors = 0
-    national_count = 0
-    regional_count = 0
-    unclassified_count = 0
+    successful = errors = missing_metadata = request_errors = extraction_errors = 0
+    short_articles = unexpected_errors = 0
+    national_count = regional_count = unclassified_count = 0
+    processed = 0
+    cancelled = False
+
+    def update(**kwargs):
+        with EXTRACTION_JOBS_LOCK:
+            job.update(kwargs)
 
     def write_failure_web(row_number, media_name, publish_date, url, reason):
         failed_buffer.write(f"[ROW {row_number}]\n")
@@ -1606,281 +1651,224 @@ if run:
         failed_buffer.write("-" * 70 + "\n\n")
 
     session = requests.Session()
+    total = len(unique_rows)
 
-    for number, row in enumerate(rows_to_process, 1):
-        raw_number = row.get("_rawnb")
-        media_name = (row.get("media_name", "") or "").strip()
-        publish_date = (row.get("publish_date", "") or "").strip()
-        raw_url = (row.get("url", "") or "").strip()
+    try:
+        for number, row in enumerate(unique_rows, 1):
+            if job["cancel_event"].is_set():
+                cancelled = True
+                break
 
-        status.write(
-            f"Processing **{number:,} / {len(rows_to_process):,}** · "
-            f"{media_name} · MediaCloud row {raw_number}"
-        )
+            raw_number = row.get("_rawnb")
+            media_name = (row.get("media_name", "") or "").strip()
+            publish_date = (row.get("publish_date", "") or "").strip()
+            raw_url = (row.get("url", "") or "").strip()
+            update(processed=number - 1, total=total, current=f"{media_name} · MediaCloud row {raw_number}")
 
-        if not media_name:
-            reason = "Missing media_name"
-            write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-            errors += 1
-            missing_metadata += 1
-            continue
-
-        year, month = extract_year_month(publish_date)
-        if not year:
-            reason = "Could not parse publish_date"
-            write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-            errors += 1
-            missing_metadata += 1
-            continue
-
-        if not valid_url(raw_url):
-            reason = "Invalid or missing URL"
-            write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-            errors += 1
-            missing_metadata += 1
-            continue
-
-        url = clean_url(raw_url)
-
-        try:
-            response = session.get(
-                url,
-                headers=HEADERS,
-                timeout=30,
-            )
-            response.raise_for_status()
-            html = response.text
-
-            article = trafilatura.extract(
-                html,
-                url=url,
-                include_comments=False,
-                include_tables=False,
-                include_images=False,
-                include_links=False,
-                favor_precision=True,
-                output_format="txt",
-            )
-
-            if not article:
-                reason = "Trafilatura returned no text"
-                write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-                errors += 1
-                extraction_errors += 1
-                progress.progress(
-                    number / len(rows_to_process),
-                    text=f"Processed {number:,} / {len(rows_to_process):,}",
-                )
-                if number < len(rows_to_process):
-                    time.sleep(delay)
+            if not media_name:
+                write_failure_web(raw_number, media_name, publish_date, raw_url, "Missing media_name")
+                errors += 1; missing_metadata += 1
                 continue
 
-            article = clean_text(article)
-
-            if len(article) < min_article_length:
-                reason = (
-                    "Extracted article is too short "
-                    f"({len(article)} characters; minimum is {min_article_length})"
-                )
-                write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-                errors += 1
-                short_articles += 1
-                progress.progress(
-                    number / len(rows_to_process),
-                    text=f"Processed {number:,} / {len(rows_to_process):,}",
-                )
-                if number < len(rows_to_process):
-                    time.sleep(delay)
+            year, month = extract_year_month(publish_date)
+            if not year:
+                write_failure_web(raw_number, media_name, publish_date, raw_url, "Could not parse publish_date")
+                errors += 1; missing_metadata += 1
                 continue
 
-            source = clean_source_name(media_name)
-            press_type = classify_for_corpus(media_name)
+            if not valid_url(raw_url):
+                write_failure_web(raw_number, media_name, publish_date, raw_url, "Invalid or missing URL")
+                errors += 1; missing_metadata += 1
+                continue
 
-            if press_type == "nationalpress":
-                national_count += 1
-            elif press_type == "regionalpress":
-                regional_count += 1
-            elif press_type == "unclassified":
-                unclassified_count += 1
-
-            custom_tokens = []
-            for original_column, field_name in custom_metadata_fields:
-                raw_value = row.get(original_column, "")
-                safe_value = clean_custom_metadata_token(raw_value)
-                custom_tokens.append(f"*{field_name}_{safe_value}")
-
-            header_parts = [
-                "****",
-                f"*source_{source}",
-                f"*year_{year}",
-                f"*yearmonth_{year}-{month}",
-            ]
-            if press_type is not None:
-                header_parts.append(f"*type_{press_type}")
-            header_parts.extend([f"*rawnb_{raw_number}", *custom_tokens])
-            header = " ".join(header_parts)
-
-            output_buffer.write(header + "\n")
-            output_buffer.write(article + "\n\n")
-            successful += 1
-
-            if press_type == "unclassified" and use_press_classification:
-                write_failure_web(
-                    raw_number,
-                    media_name,
-                    publish_date,
-                    raw_url,
-                    "Source could not be classified as National Press or Regional Press",
+            url = clean_url(raw_url)
+            try:
+                response = session.get(url, headers=HEADERS, timeout=30)
+                response.raise_for_status()
+                article = trafilatura.extract(
+                    response.text, url=url, include_comments=False,
+                    include_tables=False, include_images=False,
+                    include_links=False, favor_precision=True, output_format="txt",
                 )
 
-        except requests.exceptions.RequestException as e:
-            reason = f"Request error: {type(e).__name__}: {e}"
-            write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-            errors += 1
-            request_errors += 1
+                if not article:
+                    write_failure_web(raw_number, media_name, publish_date, raw_url, "Trafilatura returned no text")
+                    errors += 1; extraction_errors += 1
+                else:
+                    article = clean_text(article)
+                    if len(article) < min_article_length:
+                        write_failure_web(raw_number, media_name, publish_date, raw_url,
+                                          f"Extracted article is too short ({len(article)} characters; minimum is {min_article_length})")
+                        errors += 1; short_articles += 1
+                    else:
+                        source = clean_source_name(media_name)
+                        press_type = classify_source(media_name) if use_press_classification else None
+                        if press_type == "nationalpress": national_count += 1
+                        elif press_type == "regionalpress": regional_count += 1
+                        elif press_type == "unclassified": unclassified_count += 1
 
-        except Exception as e:
-            reason = f"Unexpected error: {type(e).__name__}: {e}"
-            write_failure_web(raw_number, media_name, publish_date, raw_url, reason)
-            errors += 1
-            unexpected_errors += 1
+                        custom_tokens = []
+                        for original_column, field_name in custom_metadata_fields:
+                            custom_tokens.append(f"*{field_name}_{clean_custom_metadata_token(row.get(original_column, ''))}")
 
-        progress.progress(
-            number / len(rows_to_process),
-            text=f"Processed {number:,} / {len(rows_to_process):,}",
-        )
-        metrics.write(
-            f"**Saved:** {successful:,} &nbsp; · &nbsp; "
-            f"**Failed:** {errors:,} &nbsp; · &nbsp; "
-            f"**National:** {national_count:,} &nbsp; · &nbsp; "
-            f"**Regional:** {regional_count:,} &nbsp; · &nbsp; "
-            f"**Unclassified:** {unclassified_count:,}"
-        )
+                        header_parts = ["****", f"*source_{source}", f"*year_{year}", f"*yearmonth_{year}-{month}"]
+                        if press_type is not None:
+                            header_parts.append(f"*type_{press_type}")
+                        header_parts.extend([f"*rawnb_{raw_number}", *custom_tokens])
+                        output_buffer.write(" ".join(header_parts) + "\n")
+                        output_buffer.write(article + "\n\n")
+                        successful += 1
+                        saved_counts[media_name][year] += 1
 
-        if number < len(rows_to_process):
-            time.sleep(delay)
+                        if press_type == "unclassified" and use_press_classification:
+                            write_failure_web(raw_number, media_name, publish_date, raw_url,
+                                              "Source could not be classified as National Press or Regional Press")
 
-    progress.progress(1.0, text="Corpus construction complete.")
+            except requests.exceptions.RequestException as e:
+                write_failure_web(raw_number, media_name, publish_date, raw_url, f"Request error: {type(e).__name__}: {e}")
+                errors += 1; request_errors += 1
+            except Exception as e:
+                write_failure_web(raw_number, media_name, publish_date, raw_url, f"Unexpected error: {type(e).__name__}: {e}")
+                errors += 1; unexpected_errors += 1
 
-    corpus_bytes = output_buffer.getvalue().encode("utf-8")
-    failed_bytes = failed_buffer.getvalue().encode("utf-8")
+            processed = number
+            update(processed=processed, successful=successful, errors=errors,
+                   national_count=national_count, regional_count=regional_count,
+                   unclassified_count=unclassified_count)
+            if number < total:
+                for _ in range(max(0, int(delay * 10))):
+                    if job["cancel_event"].is_set():
+                        cancelled = True
+                        break
+                    time.sleep(0.1)
+                if cancelled:
+                    break
 
-    st.success("Corpus construction completed.")
+        initial_stats_bytes, saved_stats_bytes, invalid_date_rows = build_statistics_tables(selected_rows, saved_counts)
+        initial_stats_rows = list(csv.DictReader(StringIO(initial_stats_bytes.decode("utf-8-sig"))))
+        saved_stats_rows = list(csv.DictReader(StringIO(saved_stats_bytes.decode("utf-8-sig"))))
+        plot_bytes = build_statistics_plot_from_tables(initial_stats_rows, saved_stats_rows)
 
-    st.markdown("### Research output summary")
+        corpus_bytes = output_buffer.getvalue().encode("utf-8")
+        failed_bytes = failed_buffer.getvalue().encode("utf-8")
+        result = {
+            "corpus": corpus_bytes, "failed": failed_bytes,
+            "initial_stats": initial_stats_bytes, "saved_stats": saved_stats_bytes,
+            "plot": plot_bytes, "successful": successful, "errors": errors,
+            "duplicate_count": duplicate_count, "national_count": national_count,
+            "regional_count": regional_count, "unclassified_count": unclassified_count,
+            "rows_processed": processed, "missing_metadata": missing_metadata,
+            "request_errors": request_errors, "extraction_errors": extraction_errors,
+            "short_articles": short_articles, "unexpected_errors": unexpected_errors,
+            "invalid_date_rows": invalid_date_rows, "custom_metadata_columns": [x[0] for x in custom_metadata_fields],
+            "cancelled": cancelled,
+        }
+        update(status="cancelled" if cancelled else "completed", result=result, processed=processed)
+    except Exception as e:
+        update(status="error", error=f"{type(e).__name__}: {e}")
+    finally:
+        session.close()
+
+
+if run:
+    job_id = uuid.uuid4().hex
+    with EXTRACTION_JOBS_LOCK:
+        EXTRACTION_JOBS[job_id] = {
+            "status": "starting", "processed": 0, "total": 0,
+            "successful": 0, "errors": 0, "current": "Preparing requests…",
+            "cancel_event": threading.Event(),
+        }
+    st.session_state["active_extraction_job_id"] = job_id
+    worker = threading.Thread(
+        target=extraction_worker,
+        args=(job_id, selected_rows, custom_metadata_fields, delay, min_article_length, use_press_classification),
+        daemon=True,
+    )
+    worker.start()
+
+
+@st.fragment(run_every="1s")
+def extraction_monitor():
+    job_id = st.session_state.get("active_extraction_job_id") or st.session_state.get("last_extraction_job_id")
+    if not job_id:
+        return
+    with EXTRACTION_JOBS_LOCK:
+        job = EXTRACTION_JOBS.get(job_id)
+    if not job:
+        st.session_state.pop("active_extraction_job_id", None)
+        return
+
+    st.markdown("### Extraction progress")
+    if job["status"] in {"starting", "running"}:
+        total = max(job.get("total", 0), 1)
+        done = min(job.get("processed", 0), total)
+        st.progress(done / total, text=f"Processed {done:,} / {total:,} · {job.get('current', '')}")
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("Cancel extraction", type="secondary", use_container_width=True, key=f"cancel_{job_id}"):
+                job["cancel_event"].set()
+                job["status"] = "cancelling"
+        with c2:
+            st.caption("Cancellation stops the workflow after the current web request finishes. You can then change the parameters and start again without refreshing the page.")
+        return
+
+    if job["status"] == "cancelling":
+        st.info("Cancelling extraction… the current request will finish, then processing will stop.")
+        return
+
+    if job["status"] == "error":
+        st.error(f"Extraction failed: {job.get('error', 'Unknown error')}")
+        st.session_state.pop("active_extraction_job_id", None)
+        return
+
+    out = job["result"]
+    st.progress(1.0, text="Extraction stopped." if out["cancelled"] else "Corpus construction complete.")
+    if out["cancelled"]:
+        st.warning(f"Extraction cancelled after {out['rows_processed']:,} processed records. The partial corpus and statistics below are available for inspection/download.")
+    else:
+        st.success("Corpus construction completed.")
+
     result_cols = st.columns(5)
-    result_cols[0].metric("Articles saved", f"{successful:,}")
-    result_cols[1].metric("Articles failed", f"{errors:,}")
-    result_cols[2].metric("Duplicate URLs", f"{duplicate_count:,}")
-    result_cols[3].metric("National press", f"{national_count:,}")
-    result_cols[4].metric("Regional press", f"{regional_count:,}")
+    result_cols[0].metric("Articles saved", f"{out['successful']:,}")
+    result_cols[1].metric("Articles failed", f"{out['errors']:,}")
+    result_cols[2].metric("Duplicate URLs", f"{out['duplicate_count']:,}")
+    result_cols[3].metric("National press", f"{out['national_count']:,}")
+    result_cols[4].metric("Regional press", f"{out['regional_count']:,}")
 
-    if successful:
-        success_rate = 100 * successful / len(rows_to_process)
-        st.caption(
-            f"Extraction success rate: **{success_rate:.1f}%** "
-            f"({successful:,} of {len(rows_to_process):,} processed records)."
-        )
+    st.markdown("### Statistics: initial CSV vs. saved articles")
+    st.caption("Both measures are calculated from the uploaded CSV. Initial counts use the selected CSV records; saved counts use successfully extracted articles matched back to their media and publication year. The .txt corpus is not used to calculate these statistics.")
+    st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
 
-    st.markdown("### Diagnostics")
-    failure_data = [
-        {"Failure category": "Metadata errors", "Count": missing_metadata},
-        {"Failure category": "Request errors", "Count": request_errors},
-        {"Failure category": "Extraction errors", "Count": extraction_errors},
-        {"Failure category": "Short articles", "Count": short_articles},
-        {"Failure category": "Unexpected errors", "Count": unexpected_errors},
-    ]
-    st.dataframe(
-        failure_data,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    if invalid_date_rows:
-        st.warning(
-            f"{invalid_date_rows:,} selected rows had unparseable dates and were "
-            "therefore omitted from publication statistics."
-        )
-
-    if unclassified_count:
-        st.warning(
-            f"{unclassified_count:,} successfully extracted articles came from "
-            "sources not present in the built-in National/Regional Press lists."
-        )
-
-    st.markdown("### Download research outputs")
-    st.caption(
-        f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-        "Files are produced for this session and are not intended as permanent storage."
-    )
-
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4 = st.columns(4)
     with d1:
-        st.download_button(
-            "Download IRaMuTeQ corpus",
-            data=corpus_bytes,
-            file_name=runtime_output,
-            mime="text/plain",
-            use_container_width=True,
-        )
+        st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key=f"corpus_{job_id}")
     with d2:
-        st.download_button(
-            "Download publication statistics",
-            data=stats_bytes,
-            file_name=runtime_stats,
-            mime="text/csv",
-            use_container_width=True,
-        )
+        st.download_button("Download statistics CSV", data=out["initial_stats"], file_name="publication_statistics_initial_vs_saved.csv", mime="text/csv", use_container_width=True, key=f"stats_{job_id}")
     with d3:
-        st.download_button(
-            "Download failure log",
-            data=failed_bytes,
-            file_name=runtime_failed,
-            mime="text/plain",
-            use_container_width=True,
-        )
+        st.download_button("Download statistics plot", data=out["plot"], file_name="publication_statistics_initial_vs_saved.png", mime="image/png", use_container_width=True, key=f"plot_{job_id}", disabled=out["plot"] is None)
+    with d4:
+        st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key=f"failed_{job_id}")
 
-    with st.expander("Methodological notes", expanded=False):
-        st.markdown(
-            """
-            **Publication statistics** are calculated directly from the selected
-            MediaCloud records before duplicate URL removal and before article
-            extraction.
+    if out["plot"]:
+        st.image(out["plot"], caption="Initial MediaCloud records vs. articles saved by publication year", use_container_width=True)
 
-            **Corpus counts** can therefore differ from the publication statistics.
-            Records may be excluded because of duplicate URLs, invalid metadata,
-            inaccessible pages, extraction failures, or article length.
+    with st.expander("Diagnostics", expanded=False):
+        st.dataframe([
+            {"Failure category": "Metadata errors", "Count": out["missing_metadata"]},
+            {"Failure category": "Request errors", "Count": out["request_errors"]},
+            {"Failure category": "Extraction errors", "Count": out["extraction_errors"]},
+            {"Failure category": "Short articles", "Count": out["short_articles"]},
+            {"Failure category": "Unexpected errors", "Count": out["unexpected_errors"]},
+        ], use_container_width=True, hide_index=True)
+        if out["invalid_date_rows"]:
+            st.warning(f"{out['invalid_date_rows']:,} selected rows had unparseable dates and were omitted from the initial statistics.")
 
-            **IRaMuTeQ metadata** retain the original MediaCloud row number through
-            the `rawnb` field, allowing the resulting corpus to be traced back to
-            the source CSV.
+    # Keep results available after any subsequent full-page rerun/download.
+    st.session_state["research_outputs"] = out
+    st.session_state["last_extraction_job_id"] = job_id
+    st.session_state.pop("active_extraction_job_id", None)
 
-            **Custom metadata** are copied from the selected CSV columns. The column
-            header becomes the metadata field name and each cell becomes the category
-            for that article. Metadata names and values are normalized to lowercase
-            ASCII-safe tokens; empty cells are represented as `missing`.
-            """
-        )
-
-    st.session_state["research_outputs"] = {
-        "corpus": corpus_bytes,
-        "failed": failed_bytes,
-        "stats": stats_bytes,
-        "successful": successful,
-        "errors": errors,
-        "duplicate_count": duplicate_count,
-        "national_count": national_count,
-        "regional_count": regional_count,
-        "unclassified_count": unclassified_count,
-        "rows_processed": len(rows_to_process),
-        "missing_metadata": missing_metadata,
-        "request_errors": request_errors,
-        "extraction_errors": extraction_errors,
-        "short_articles": short_articles,
-        "unexpected_errors": unexpected_errors,
-        "invalid_date_rows": invalid_date_rows,
-        "custom_metadata_columns": custom_metadata_columns,
-    }
+extraction_monitor()
 
 # ------------------------------------------------------------
 # Persistent research outputs
@@ -1902,14 +1890,28 @@ if st.session_state.get("research_outputs") and not run:
     if out["successful"]:
         st.caption(f"Extraction success rate: **{100 * out['successful'] / out['rows_processed']:.1f}%** ({out['successful']:,} of {out['rows_processed']:,} processed records).")
 
+    st.markdown("### Publication statistics")
+    st.caption("The statistics are calculated from the CSV, not from the .txt corpus.")
+    st.markdown("#### Initial articles in the selected CSV")
+    st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
+    st.markdown("#### Articles successfully saved")
+    st.dataframe(list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
+
     st.markdown("### Download research outputs")
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4, d5 = st.columns(5)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key="download_corpus_persistent")
     with d2:
-        st.download_button("Download publication statistics", data=out["stats"], file_name="publication_counts_by_year.csv", mime="text/csv", use_container_width=True, key="download_stats_persistent")
+        st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key="download_initial_stats_persistent")
     with d3:
+        st.download_button("Download saved statistics", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key="download_saved_stats_persistent")
+    with d4:
+        st.download_button("Download comparison plot", data=out.get("plot"), file_name="publication_counts_comparison.png", mime="image/png", use_container_width=True, key="download_plot_persistent", disabled=out.get("plot") is None)
+    with d5:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key="download_failed_persistent")
+
+    if out.get("plot"):
+        st.image(out["plot"], caption="Initial MediaCloud records vs. articles saved by publication year", use_container_width=True)
 
     with st.expander("Diagnostics", expanded=False):
         st.dataframe([
