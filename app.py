@@ -1038,6 +1038,19 @@ st.markdown(
         fill: #ffffff !important;
         color: #ffffff !important;
     }
+    /* BaseWeb renders the selected value in a nested single-value element;
+       override the global dark-text rule with higher specificity. */
+    div[data-testid="stSelectbox"] [data-baseweb="select"] [class*="singleValue"],
+    div[data-testid="stSelectbox"] [data-baseweb="select"] [class*="singleValue"] span,
+    div[data-testid="stSelectbox"] [data-baseweb="select"] [class*="placeholder"] {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    div[data-testid="stSelectbox"] [data-baseweb="select"] input {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        caret-color: #ffffff !important;
+    }
     [data-baseweb="popover"] [role="option"],
     [data-baseweb="popover"] [role="option"] * {
         color: #ffffff !important;
@@ -1931,9 +1944,18 @@ def extraction_monitor():
 
     st.markdown("### Publication statistics")
     st.caption("Initial = records in the selected CSV. Saved = articles actually present in the generated .txt corpus, reconstructed from each IRaMuTeQ header and its original rawnb row number. Both tables use the same year × media format.")
-    st.markdown("#### Initial articles")
+    table_cols_1 = st.columns([4, 1])
+    with table_cols_1[0]:
+        st.markdown("#### Initial articles in the selected CSV")
+    with table_cols_1[1]:
+        st.download_button("⬇ CSV", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key=f"initial_table_csv_{job_id}", help="Download this table as CSV")
     st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
-    st.markdown("#### Articles successfully saved")
+
+    table_cols_2 = st.columns([4, 1])
+    with table_cols_2[0]:
+        st.markdown("#### Articles successfully saved")
+    with table_cols_2[1]:
+        st.download_button("⬇ CSV", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key=f"saved_table_csv_{job_id}", help="Download this table as CSV")
     st.dataframe(list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
 
     initial_rows_for_plot = list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig"))))
@@ -1949,12 +1971,10 @@ def extraction_monitor():
         fig.update_layout(title=f"Initial vs. saved articles — {selected_plot_media}", xaxis_title="Year", yaxis_title="Number of articles", hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True, key=f"plot_monitor_{job_id}")
 
-    d1, d2, d3 = st.columns(3)
+    d1, d2 = st.columns(2)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key=f"corpus_{job_id}")
     with d2:
-        st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key=f"initial_stats_{job_id}")
-    with d3:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key=f"failed_{job_id}")
 
     # Keep results available after any subsequent full-page rerun/download.
@@ -1987,9 +2007,18 @@ if st.session_state.get("research_outputs") and not run:
 
     st.markdown("### Publication statistics")
     st.caption("Initial counts come from the selected CSV. Saved counts are reconstructed from the generated .txt corpus using each article header and its original MediaCloud row number (rawnb).")
-    st.markdown("#### Initial articles in the selected CSV")
+    table_cols_1 = st.columns([4, 1])
+    with table_cols_1[0]:
+        st.markdown("#### Initial articles in the selected CSV")
+    with table_cols_1[1]:
+        st.download_button("⬇ CSV", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key="initial_table_csv_persistent", help="Download this table as CSV")
     st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
-    st.markdown("#### Articles successfully saved")
+
+    table_cols_2 = st.columns([4, 1])
+    with table_cols_2[0]:
+        st.markdown("#### Articles successfully saved")
+    with table_cols_2[1]:
+        st.download_button("⬇ CSV", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key="saved_table_csv_persistent", help="Download this table as CSV")
     st.dataframe(list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
 
     initial_rows_for_plot = list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig"))))
@@ -2006,12 +2035,10 @@ if st.session_state.get("research_outputs") and not run:
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Download research outputs")
-    d1, d2, d3 = st.columns(3)
+    d1, d2 = st.columns(2)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key="download_corpus_persistent")
     with d2:
-        st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key="download_initial_stats_persistent")
-    with d3:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key="download_failed_persistent")
 
     if out.get("plot"):
