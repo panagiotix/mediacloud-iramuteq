@@ -1558,8 +1558,16 @@ def build_statistics_tables(selected_rows, saved_counts):
             writer.writerow([year] + [counts[year].get(source, 0) for source in ordered_sources])
         return output.getvalue().encode("utf-8-sig")
 
+    # saved_counts is collected as media -> year during extraction, while the
+    # matrix renderer expects year -> media. Convert it explicitly before
+    # writing the saved-articles table.
+    saved_by_year = defaultdict(lambda: defaultdict(int))
+    for media, year_counts in saved_counts.items():
+        for year, count in year_counts.items():
+            saved_by_year[year][media] += count
+
     initial_csv = matrix_csv(initial_counts)
-    saved_csv = matrix_csv(saved_counts)
+    saved_csv = matrix_csv(saved_by_year)
     return initial_csv, saved_csv, invalid_date_rows
 
 
