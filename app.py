@@ -1077,6 +1077,48 @@ st.markdown(
         background-color: #111111 !important;
     }
 
+    /* Download buttons: Streamlit may render the label in nested elements
+       that inherit the global light-text rule. Force every visible part to white. */
+    [data-testid="stDownloadButton"] > button,
+    [data-testid="stDownloadButton"] > button *,
+    div.stDownloadButton > button,
+    div.stDownloadButton > button *,
+    .stDownloadButton button p,
+    .stDownloadButton button span,
+    .stDownloadButton button div,
+    .stDownloadButton button svg,
+    .stDownloadButton button svg *,
+    .stDownloadButton button path {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+    [data-testid="stDownloadButton"] > button,
+    div.stDownloadButton > button {
+        background-color: #111111 !important;
+        border-color: #111111 !important;
+    }
+
+    /* Comparison selectbox: force the selected value itself to white.
+       This intentionally targets the BaseWeb value node rather than only
+       the outer select container. */
+    [data-testid="stSelectbox"] [data-baseweb="select"] [class*="singleValue"],
+    [data-testid="stSelectbox"] [data-baseweb="select"] [class*="singleValue"] *,
+    [data-testid="stSelectbox"] [data-baseweb="select"] [class*="placeholder"],
+    [data-testid="stSelectbox"] [data-baseweb="select"] [class*="placeholder"] *,
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    [data-testid="stSelectbox"] [data-baseweb="select"] svg,
+    [data-testid="stSelectbox"] [data-baseweb="select"] svg * {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+
     /* File uploader: Upload/browse action must use white text and icon. */
     [data-testid="stFileUploader"] button,
     [data-testid="stFileUploader"] button *,
