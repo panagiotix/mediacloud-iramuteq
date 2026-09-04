@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import trafilatura
+import plotly.graph_objects as go
 
 
 # Background extraction jobs. A small in-process job registry lets Streamlit
@@ -1527,20 +1528,27 @@ run = st.button(
 )
 
 
-def build_statistics_tables(selected_rows, saved_counts):
-    """Create two separate per-year x media tables directly from CSV records.
+def build_statistics_tables(selected_rows, corpus_text):
+    """Create initial and saved year x media matrices.
 
-    The initial table counts selected CSV rows before URL deduplication.
-    The saved table counts successfully extracted records by media/year.
+    Initial counts come from the selected CSV before URL deduplication.
+    Saved counts are reconstructed from the generated IRaMuTeQ TXT corpus by
+    reading each saved article header and using its rawnb to recover the
+    original CSV media_name/year. This makes the saved table reflect exactly
+    what was actually written to the corpus.
     """
     initial_counts = defaultdict(lambda: defaultdict(int))
     years = set()
     sources = set()
     invalid_date_rows = 0
 
+    row_lookup = {}
     for row in selected_rows:
         media = (row.get("media_name", "") or "").strip()
+        raw_number = str(row.get("_rawnb", "") or "").strip()
         year = extract_year((row.get("publish_date", "") or "").strip())
+        if raw_number:
+            row_lookup[raw_number] = (media, year)
         if not media or not year:
             if media and not year:
                 invalid_date_rows += 1
@@ -1548,6 +1556,30 @@ def build_statistics_tables(selected_rows, saved_counts):
         initial_counts[year][media] += 1
         years.add(year)
         sources.add(media)
+
+    # Reconstruct saved counts directly from the generated TXT corpus.
+    # Every saved article has a header containing *year_YYYY and *rawnb_N.
+    saved_counts = defaultdict(lambda: defaultdict(int))
+    header_re = re.compile(r"^\*\*\*\*.*?\*year_(\d{4}).*?\*rawnb_([^\s]+)")
+    for line in corpus_text.splitlines():
+        if not line.startswith("****"):
+            continue
+        match = header_re.search(line)
+        if not match:
+            continue
+        header_year, raw_number = match.groups()
+        raw_number = raw_number.strip()
+        media_year = row_lookup.get(raw_number)
+        if media_year:
+            media, csv_year = media_year
+            if media:
+                # Prefer the original CSV publication year, while falling back
+                # to the header year if necessary.
+                year = csv_year or header_year
+                if year:
+                    saved_counts[year][media] += 1
+                    years.add(year)
+                    sources.add(media)
 
     def matrix_csv(counts):
         output = io.StringIO()
@@ -1558,58 +1590,59 @@ def build_statistics_tables(selected_rows, saved_counts):
             writer.writerow([year] + [counts[year].get(source, 0) for source in ordered_sources])
         return output.getvalue().encode("utf-8-sig")
 
-    # saved_counts is collected as media -> year during extraction, while the
-    # matrix renderer expects year -> media. Convert it explicitly before
-    # writing the saved-articles table.
-    saved_by_year = defaultdict(lambda: defaultdict(int))
-    for media, year_counts in saved_counts.items():
-        for year, count in year_counts.items():
-            saved_by_year[year][media] += count
-
-    initial_csv = matrix_csv(initial_counts)
-    saved_csv = matrix_csv(saved_by_year)
-    return initial_csv, saved_csv, invalid_date_rows
+    return matrix_csv(initial_counts), matrix_csv(saved_counts), invalid_date_rows
 
 
-def build_statistics_plot_from_tables(initial_rows, saved_rows):
-    """Create a saveable PNG comparing totals from the two CSV-derived tables by year."""
-    initial_totals = defaultdict(int)
-    saved_totals = defaultdict(int)
+def build_interactive_plot_data(initial_rows, saved_rows):
+    """Return data keyed by media for the interactive year-by-year comparison."""
+    initial_by_media = defaultdict(dict)
+    saved_by_media = defaultdict(dict)
 
     for row in initial_rows:
         year = str(row.get("year", ""))
         if not year:
             continue
-        initial_totals[year] += sum(int(value or 0) for key, value in row.items() if key != "year")
+        for media, value in row.items():
+            if media == "year":
+                continue
+            initial_by_media[media][year] = int(value or 0)
 
     for row in saved_rows:
         year = str(row.get("year", ""))
         if not year:
             continue
-        saved_totals[year] += sum(int(value or 0) for key, value in row.items() if key != "year")
+        for media, value in row.items():
+            if media == "year":
+                continue
+            saved_by_media[media][year] = int(value or 0)
 
-    years = sorted(set(initial_totals) | set(saved_totals), key=int)
+    return initial_by_media, saved_by_media
+
+
+def build_statistics_plot_png(initial_rows, saved_rows, selected_media=None):
+    """Create a fallback downloadable PNG for one selected media."""
+    initial_by_media, saved_by_media = build_interactive_plot_data(initial_rows, saved_rows)
+    media = selected_media or (sorted(initial_by_media, key=str.lower)[0] if initial_by_media else None)
+    if not media:
+        return None
+    years = sorted(set(initial_by_media.get(media, {})) | set(saved_by_media.get(media, {})), key=int)
     if not years:
         return None
 
-    initial = [initial_totals[y] for y in years]
-    saved = [saved_totals[y] for y in years]
-
+    import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.plot(years, initial, marker="o", linewidth=2, label="Initial CSV records")
-    ax.plot(years, saved, marker="o", linewidth=2, label="Articles saved")
-    ax.set_title("Initial MediaCloud records vs. articles saved")
+    ax.plot(years, [initial_by_media[media].get(y, 0) for y in years], marker="o", linewidth=2, label="Initial articles")
+    ax.plot(years, [saved_by_media[media].get(y, 0) for y in years], marker="o", linewidth=2, label="Articles saved")
+    ax.set_title(f"Initial vs. saved articles — {media}")
     ax.set_xlabel("Publication year")
     ax.set_ylabel("Number of articles")
     ax.grid(axis="y", alpha=0.25)
     ax.legend()
     fig.tight_layout()
-
     buffer = BytesIO()
     fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
     plt.close(fig)
     return buffer.getvalue()
-
 
 def extraction_worker(job_id, selected_rows, custom_metadata_fields, delay, min_article_length, use_press_classification):
     with EXTRACTION_JOBS_LOCK:
@@ -1752,12 +1785,13 @@ def extraction_worker(job_id, selected_rows, custom_metadata_fields, delay, min_
                 if cancelled:
                     break
 
-        initial_stats_bytes, saved_stats_bytes, invalid_date_rows = build_statistics_tables(selected_rows, saved_counts)
+        corpus_text = output_buffer.getvalue()
+        initial_stats_bytes, saved_stats_bytes, invalid_date_rows = build_statistics_tables(selected_rows, corpus_text)
         initial_stats_rows = list(csv.DictReader(StringIO(initial_stats_bytes.decode("utf-8-sig"))))
         saved_stats_rows = list(csv.DictReader(StringIO(saved_stats_bytes.decode("utf-8-sig"))))
-        plot_bytes = build_statistics_plot_from_tables(initial_stats_rows, saved_stats_rows)
+        plot_bytes = build_statistics_plot_png(initial_stats_rows, saved_stats_rows)
 
-        corpus_bytes = output_buffer.getvalue().encode("utf-8")
+        corpus_bytes = corpus_text.encode("utf-8")
         failed_bytes = failed_buffer.getvalue().encode("utf-8")
         result = {
             "corpus": corpus_bytes, "failed": failed_bytes,
@@ -1843,35 +1877,40 @@ def extraction_monitor():
     result_cols[3].metric("National press", f"{out['national_count']:,}")
     result_cols[4].metric("Regional press", f"{out['regional_count']:,}")
 
-    st.markdown("### Statistics: initial CSV vs. saved articles")
-    st.caption("Both measures are calculated from the uploaded CSV. Initial counts use the selected CSV records; saved counts use successfully extracted articles matched back to their media and publication year. The .txt corpus is not used to calculate these statistics.")
+    st.markdown("### Publication statistics")
+    st.caption("Initial = records in the selected CSV. Saved = articles actually present in the generated .txt corpus, reconstructed from each IRaMuTeQ header and its original rawnb row number. Both tables use the same year × media format.")
+    st.markdown("#### Initial articles")
     st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
+    st.markdown("#### Articles successfully saved")
+    st.dataframe(list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
 
-    d1, d2, d3, d4 = st.columns(4)
+    initial_rows_for_plot = list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig"))))
+    saved_rows_for_plot = list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig"))))
+    initial_by_media, saved_by_media = build_interactive_plot_data(initial_rows_for_plot, saved_rows_for_plot)
+    media_options = sorted(initial_by_media.keys(), key=str.lower)
+    if media_options:
+        selected_plot_media = st.selectbox("Choose a media source for the comparison", media_options, key=f"plot_media_monitor_{job_id}")
+        years = sorted(set(initial_by_media.get(selected_plot_media, {})) | set(saved_by_media.get(selected_plot_media, {})), key=int)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=years, y=[initial_by_media[selected_plot_media].get(y, 0) for y in years], mode="lines+markers", name="Initial articles"))
+        fig.add_trace(go.Scatter(x=years, y=[saved_by_media[selected_plot_media].get(y, 0) for y in years], mode="lines+markers", name="Articles saved"))
+        fig.update_layout(title=f"Initial vs. saved articles — {selected_plot_media}", xaxis_title="Year", yaxis_title="Number of articles", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True, key=f"plot_monitor_{job_id}")
+
+    d1, d2, d3, d4, d5 = st.columns(5)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key=f"corpus_{job_id}")
     with d2:
-        st.download_button("Download statistics CSV", data=out["initial_stats"], file_name="publication_statistics_initial_vs_saved.csv", mime="text/csv", use_container_width=True, key=f"stats_{job_id}")
+        st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key=f"initial_stats_{job_id}")
     with d3:
-        st.download_button("Download statistics plot", data=out["plot"], file_name="publication_statistics_initial_vs_saved.png", mime="image/png", use_container_width=True, key=f"plot_{job_id}", disabled=out["plot"] is None)
+        st.download_button("Download saved statistics", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key=f"saved_stats_{job_id}")
     with d4:
+        st.download_button("Download comparison PNG", data=out["plot"], file_name="publication_counts_comparison.png", mime="image/png", use_container_width=True, key=f"plot_{job_id}", disabled=out["plot"] is None)
+    with d5:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key=f"failed_{job_id}")
 
-    if out["plot"]:
-        st.image(out["plot"], caption="Initial MediaCloud records vs. articles saved by publication year", use_container_width=True)
-
-    with st.expander("Diagnostics", expanded=False):
-        st.dataframe([
-            {"Failure category": "Metadata errors", "Count": out["missing_metadata"]},
-            {"Failure category": "Request errors", "Count": out["request_errors"]},
-            {"Failure category": "Extraction errors", "Count": out["extraction_errors"]},
-            {"Failure category": "Short articles", "Count": out["short_articles"]},
-            {"Failure category": "Unexpected errors", "Count": out["unexpected_errors"]},
-        ], use_container_width=True, hide_index=True)
-        if out["invalid_date_rows"]:
-            st.warning(f"{out['invalid_date_rows']:,} selected rows had unparseable dates and were omitted from the initial statistics.")
-
     # Keep results available after any subsequent full-page rerun/download.
+
     st.session_state["research_outputs"] = out
     st.session_state["last_extraction_job_id"] = job_id
     st.session_state.pop("active_extraction_job_id", None)
@@ -1899,11 +1938,24 @@ if st.session_state.get("research_outputs") and not run:
         st.caption(f"Extraction success rate: **{100 * out['successful'] / out['rows_processed']:.1f}%** ({out['successful']:,} of {out['rows_processed']:,} processed records).")
 
     st.markdown("### Publication statistics")
-    st.caption("The statistics are calculated from the CSV, not from the .txt corpus.")
+    st.caption("Initial counts come from the selected CSV. Saved counts are reconstructed from the generated .txt corpus using each article header and its original MediaCloud row number (rawnb).")
     st.markdown("#### Initial articles in the selected CSV")
     st.dataframe(list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
     st.markdown("#### Articles successfully saved")
     st.dataframe(list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig")))), use_container_width=True, hide_index=True)
+
+    initial_rows_for_plot = list(csv.DictReader(StringIO(out["initial_stats"].decode("utf-8-sig"))))
+    saved_rows_for_plot = list(csv.DictReader(StringIO(out["saved_stats"].decode("utf-8-sig"))))
+    initial_by_media, saved_by_media = build_interactive_plot_data(initial_rows_for_plot, saved_rows_for_plot)
+    media_options = sorted(initial_by_media.keys(), key=str.lower)
+    if media_options:
+        selected_plot_media = st.selectbox("Choose a media source", media_options, key="plot_media_persistent")
+        years = sorted(set(initial_by_media.get(selected_plot_media, {})) | set(saved_by_media.get(selected_plot_media, {})), key=int)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=years, y=[initial_by_media[selected_plot_media].get(y, 0) for y in years], mode="lines+markers", name="Initial articles"))
+        fig.add_trace(go.Scatter(x=years, y=[saved_by_media[selected_plot_media].get(y, 0) for y in years], mode="lines+markers", name="Articles saved"))
+        fig.update_layout(title=f"Initial vs. saved articles — {selected_plot_media}", xaxis_title="Publication year", yaxis_title="Number of articles", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Download research outputs")
     d1, d2, d3, d4, d5 = st.columns(5)
