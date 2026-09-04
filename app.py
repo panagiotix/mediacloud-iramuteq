@@ -1025,6 +1025,58 @@ st.markdown(
         border-color: #777777 !important;
     }
 
+    /* High-contrast comparison selector: dark control with white text and icons. */
+    div[data-testid="stSelectbox"] [data-baseweb="select"],
+    div[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+    div[data-testid="stSelectbox"] [data-baseweb="select"] * {
+        background-color: #111111 !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border-color: #555555 !important;
+    }
+    div[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+        fill: #ffffff !important;
+        color: #ffffff !important;
+    }
+    [data-baseweb="popover"] [role="option"],
+    [data-baseweb="popover"] [role="option"] * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    [data-baseweb="popover"] [role="option"] {
+        background-color: #111111 !important;
+    }
+    [data-baseweb="popover"] [role="option"][aria-selected="true"],
+    [data-baseweb="popover"] [role="option"]:hover {
+        background-color: #2b2b2b !important;
+    }
+
+    /* Dataframe/table toolbar: keep action icons visible on the dark toolbar. */
+    [data-testid="stDataFrame"] button,
+    [data-testid="stDataFrame"] button *,
+    [data-testid="stDataFrame"] [role="button"],
+    [data-testid="stDataFrame"] [role="button"] * {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+    [data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
+        background-color: #111111 !important;
+    }
+
+    /* File uploader: Upload/browse action must use white text and icon. */
+    [data-testid="stFileUploader"] button,
+    [data-testid="stFileUploader"] button *,
+    [data-testid="stFileUploader"] [role="button"],
+    [data-testid="stFileUploader"] [role="button"] * {
+        background-color: #111111 !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+        border-color: #111111 !important;
+    }
+
     /* Metadata field names on dark research cards. */
     .metadata-card {
         background: #111111 !important;
@@ -1897,16 +1949,12 @@ def extraction_monitor():
         fig.update_layout(title=f"Initial vs. saved articles — {selected_plot_media}", xaxis_title="Year", yaxis_title="Number of articles", hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True, key=f"plot_monitor_{job_id}")
 
-    d1, d2, d3, d4, d5 = st.columns(5)
+    d1, d2, d3 = st.columns(3)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key=f"corpus_{job_id}")
     with d2:
         st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key=f"initial_stats_{job_id}")
     with d3:
-        st.download_button("Download saved statistics", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key=f"saved_stats_{job_id}")
-    with d4:
-        st.download_button("Download comparison PNG", data=out["plot"], file_name="publication_counts_comparison.png", mime="image/png", use_container_width=True, key=f"plot_{job_id}", disabled=out["plot"] is None)
-    with d5:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key=f"failed_{job_id}")
 
     # Keep results available after any subsequent full-page rerun/download.
@@ -1958,16 +2006,12 @@ if st.session_state.get("research_outputs") and not run:
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Download research outputs")
-    d1, d2, d3, d4, d5 = st.columns(5)
+    d1, d2, d3 = st.columns(3)
     with d1:
         st.download_button("Download IRaMuTeQ corpus", data=out["corpus"], file_name="news_iramuteq.txt", mime="text/plain", use_container_width=True, key="download_corpus_persistent")
     with d2:
         st.download_button("Download initial statistics", data=out["initial_stats"], file_name="publication_counts_initial.csv", mime="text/csv", use_container_width=True, key="download_initial_stats_persistent")
     with d3:
-        st.download_button("Download saved statistics", data=out["saved_stats"], file_name="publication_counts_saved.csv", mime="text/csv", use_container_width=True, key="download_saved_stats_persistent")
-    with d4:
-        st.download_button("Download comparison plot", data=out.get("plot"), file_name="publication_counts_comparison.png", mime="image/png", use_container_width=True, key="download_plot_persistent", disabled=out.get("plot") is None)
-    with d5:
         st.download_button("Download failure log", data=out["failed"], file_name="failed_articles.txt", mime="text/plain", use_container_width=True, key="download_failed_persistent")
 
     if out.get("plot"):
