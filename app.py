@@ -387,8 +387,10 @@ def clean_url(url):
         https://example.gr/article
     """
 
+    cleaned = str(url).strip().strip("\"'").strip()
+
     parts = urlsplit(
-        url.strip()
+        cleaned
     )
 
     return urlunsplit(
@@ -412,13 +414,14 @@ def valid_url(url):
     """
 
     if not url:
-
         return False
 
+    cleaned = str(url).strip().strip("\"'").strip()
+
     return (
-        url.startswith("http://")
+        cleaned.startswith("http://")
         or
-        url.startswith("https://")
+        cleaned.startswith("https://")
     )
 
 
@@ -1217,12 +1220,28 @@ def normalize_csv_header(value):
 
 
 def read_csv_robustly(decoded):
-    """Read normal CSVs plus common spreadsheet quoting variations."""
+    """Read normal CSVs plus common spreadsheet quoting variations.
+
+    Some spreadsheet exports use single quotes as the CSV quote character.
+    If we first parse such a file with the default double-quote parser, the
+    headers can be normalized successfully but the *cell values keep their
+    surrounding single quotes*. That makes URLs such as
+    ``'https://example.org/article'`` fail URL validation.
+
+    Detect the quoting style before parsing so both headers and values are
+    interpreted consistently.
+    """
     required_columns = {"media_name", "publish_date", "url"}
-    attempts = [
-        {},
-        {"quotechar": "'"},
-    ]
+
+    # Look at the first non-empty line. The uploaded CSV in particular starts
+    # fields with single quotes, so use that quote character for the whole file.
+    first_line = next((line for line in decoded.splitlines() if line.strip()), "")
+    if first_line.lstrip().startswith("'"):
+        attempts = [{"quotechar": "'"}, {}]
+    elif first_line.lstrip().startswith('"'):
+        attempts = [{}, {"quotechar": "'"}]
+    else:
+        attempts = [{}, {"quotechar": "'"}]
 
     last_reader = None
     for kwargs in attempts:
